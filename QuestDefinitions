@@ -1,0 +1,223 @@
+local QuestDefinitions = {}
+
+local function buildIndex(definitions)
+	local guaranteedIds = {}
+	local definitionsById = {}
+
+	for _, def in ipairs(definitions) do
+		def.Reward = def.Reward or 150
+		table.insert(guaranteedIds, def.ID)
+		definitionsById[def.ID] = def
+	end
+
+	return guaranteedIds, definitionsById
+end
+
+QuestDefinitions.Sections = {
+	Daily = {
+		ResetSeconds = 24 * 60 * 60,
+		ResetKey = "LastQuestReset",
+		ActiveKey = "ActiveQuests",
+		ProgressKey = "QuestProgress",
+		CompletedKey = "CompletedQuests",
+		ClaimedKey = "ClaimedQuests",
+		Definitions = {
+			{
+				ID = "kills20",
+				Description = "Get 20 kills",
+				Goal = 20,
+				Stat = "Kills",
+				Reward = 350,
+			},
+			{
+				ID = "grabs15",
+				Description = "Perform 15 grabs",
+				Goal = 15,
+				Stat = "Grabs",
+				Reward = 300,
+			},
+			{
+				ID = "streak5",
+				Description = "Achieve a 5x killstreak",
+				Goal = 5,
+				Stat = "KillStreak",
+				Reward = 400,
+			},
+			{
+				ID = "clash2",
+				Description = "Get 2 Grab Clashes",
+				Goal = 2,
+				Stat = "GrabClashes",
+				Reward = 250,
+			},
+			{
+				ID = "money200",
+				Description = "Earn 200 G$",
+				Goal = 200,
+				Stat = "MoneyEarned",
+				Reward = 200,
+			},
+			{
+				ID = "survive6",
+				Description = "Survive 6 minutes without dying",
+				Goal = 360,
+				Stat = "SurvivalTime",
+				Reward = 500,
+				DisplayDivisor = 60,
+			},
+			{
+				ID = "double3",
+				Description = "Get 3 double kills",
+				Goal = 3,
+				Stat = "DoubleKills",
+				Reward = 350,
+			},
+		},
+	},
+	Weekly = {
+		ResetSeconds = 7 * 24 * 60 * 60,
+		ResetKey = "LastWeeklyQuestReset",
+		ActiveKey = "ActiveWeeklyQuests",
+		ProgressKey = "WeeklyQuestProgress",
+		CompletedKey = "CompletedWeeklyQuests",
+		ClaimedKey = "ClaimedWeeklyQuests",
+		Definitions = {
+			{
+				ID = "weekKills100",
+				Description = "Get 100 kills",
+				Goal = 100,
+				Stat = "Kills",
+				Reward = 1500,
+			},
+			{
+				ID = "weekGrabs75",
+				Description = "Perform 75 grabs",
+				Goal = 75,
+				Stat = "Grabs",
+				Reward = 1200,
+			},
+			{
+				ID = "weekStreak10",
+				Description = "Achieve a 8x killstreak",
+				Goal = 8,
+				Stat = "KillStreak",
+				Reward = 1800,
+			},
+			{
+				ID = "weekClash10",
+				Description = "Get 10 Grab Clashes",
+				Goal = 10,
+				Stat = "GrabClashes",
+				Reward = 1000,
+			},
+			{
+				ID = "weekMoney3000",
+				Description = "Earn 1,000 G$",
+				Goal = 1000,
+				Stat = "MoneyEarned",
+				Reward = 800,
+			},
+			{
+				ID = "weekSurvive15",
+				Description = "Survive 30 minutes without dying",
+				Goal = 1800,
+				Stat = "SurvivalTime",
+				Reward = 2000,
+				DisplayDivisor = 60,
+			},
+			{
+				ID = "weekDouble10",
+				Description = "Get 15 double kills",
+				Goal = 15,
+				Stat = "DoubleKills",
+				Reward = 1400,
+			},
+		},
+	},
+	Lifetime = {
+		ResetSeconds = math.huge,
+		ResetKey = "LastLifetimeQuestReset",
+		ActiveKey = "ActiveLifetimeQuests",
+		ProgressKey = "LifetimeQuestProgress",
+		CompletedKey = "CompletedLifetimeQuests",
+		ClaimedKey = "ClaimedLifetimeQuests",
+		Definitions = {
+			{
+				ID = "lifeKills2500",
+				Description = "Get 2500 kills",
+				Goal = 2500,
+				Stat = "Kills",
+				Reward = 35000,
+			},
+			{
+				ID = "lifeGrabs2000",
+				Description = "Perform 2000 grabs",
+				Goal = 2000,
+				Stat = "Grabs",
+				Reward = 25000,
+			},
+			{
+				ID = "lifeStreak15",
+				Description = "Achieve a 15x killstreak",
+				Goal = 15,
+				Stat = "KillStreak",
+				Reward = 5000,
+			},
+			{
+				ID = "lifeClash200",
+				Description = "Get 200 Grab Clashes",
+				Goal = 200,
+				Stat = "GrabClashes",
+				Reward = 15000,
+			},
+			{
+				ID = "lifeMoney25000",
+				Description = "Earn 25000 G$",
+				Goal = 25000,
+				Stat = "MoneyEarned",
+				Reward = 12000,
+			},
+			{
+				ID = "lifeSurvive600",
+				Description = "Survive 600 minutes without dying",
+				Goal = 36000,
+				Stat = "SurvivalTime",
+				Reward = 40000,
+				DisplayDivisor = 60,
+			},
+			{
+				ID = "lifeDouble350",
+				Description = "Get 350 double kills",
+				Goal = 350,
+				Stat = "DoubleKills",
+				Reward = 20000,
+			},
+		},
+	},
+}
+
+for sectionName, section in pairs(QuestDefinitions.Sections) do
+	section.Name = sectionName
+	section.GuaranteedIds, section.DefinitionsById = buildIndex(section.Definitions)
+end
+
+function QuestDefinitions:GetSection(sectionName)
+	return self.Sections[sectionName]
+end
+
+function QuestDefinitions:GetSectionNames()
+	return {"Daily", "Weekly", "Lifetime"}
+end
+
+function QuestDefinitions:BuildQuestFromDef(def)
+	return {
+		ID = def.ID,
+		Description = def.Description,
+		Goal = def.Goal,
+		Stat = def.Stat,
+		Reward = def.Reward or 150,
+		DisplayDivisor = def.DisplayDivisor,
+	}
+end
+
+return QuestDefinitions
