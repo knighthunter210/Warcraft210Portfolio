@@ -1,0 +1,774 @@
+local ProfileStore = require(game.ServerScriptService.Libs.ProfileStore)
+local Players = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local RunService = game:GetService("RunService") -- Added to check for Studio
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local PromptRestoreStreak = Remotes:WaitForChild("PromptRestoreStreak")
+local StreakRestored = Remotes:WaitForChild("StreakRestored")
+local DeclineRestoreStreak = Remotes:WaitForChild("DeclineRestoreStreak")
+local PlaySFX = Remotes:WaitForChild("PlaySFX")
+
+local ShopInfo = require(ReplicatedStorage.Modules.ShopInfo)
+local StatsService = require(game.ServerScriptService.Data.StatsService)
+local lobbyPart = workspace:WaitForChild("LobbyPart")
+
+local PROFILE_TEMPLATE = {
+	Grabs = 0,
+	Kills = 0,
+	KillStreak = 0,
+	HighestKillStreak = 0,
+	LastLostStreak = 0,
+	Money = 10000,
+	TotalGSEarned = 0,
+	TotalGrabClashes = 0,
+	TimePlayedSeconds = 0,
+	EquippedGauntlent = "Gauntlent",
+	EquippedAbility = "Dash",
+	EquippedTitle = "",
+	EquippedGrabAnimation = "Default",
+	OwnedGauntlents = {"Gauntlent"},
+	OwnedAbilities = {"Dash"},
+	OwnedGrabAnimations = {},
+	OwnedTitles = {},
+	LastQuestReset = 0,
+	LastWeeklyQuestReset = 0,
+	ActiveWeeklyQuests = {},
+	WeeklyQuestProgress = {},
+	CompletedWeeklyQuests = {},
+	ClaimedWeeklyQuests = {},
+	LastLifetimeQuestReset = 0,
+	ActiveLifetimeQuests = {},
+	LifetimeQuestProgress = {},
+	CompletedLifetimeQuests = {},
+	ClaimedLifetimeQuests = {}
+}
+
+local defaultStoreName = "luffy"
+
+local PlayerStore = ProfileStore.New(defaultStoreName, PROFILE_TEMPLATE)
+local RESTORE_PRODUCT_ID = 3416523664
+local AUTOSAVE_INTERVAL = 60
+local VOID_Y = -200
+
+local Profiles = {}
+local AutoSaveTasks = {}
+local ProfileManager = {}
+local KillFired = {}
+local KillCooldown = {}
+
+local function alreadyCredited(character)
+	return character:FindFirstChild("KillCredited") ~= nil
+end
+
+local function markCredited(character)
+	if not alreadyCredited(character) then
+		local creditedTag = Instance.new("BoolValue")
+		creditedTag.Name = "KillCredited"
+		creditedTag.Parent = character
+		creditedTag:SetAttribute("Persistent", true)
+	end
+end
+
+local function safeSave(profile)
+	-- Disable saving if we are in Studio to prevent overwriting real data with test data
+	if RunService:IsStudio() then return end
+
+	if profile then
+		local ok = pcall(function()
+			profile:Save()
+		end)
+		if not ok then end
+	end
+end
+
+local function isInLobby(character)
+	if not character then return false end
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return false end
+	local rel = lobbyPart.CFrame:PointToObjectSpace(root.Position)
+	return math.abs(rel.X) <= lobbyPart.Size.X/2 and math.abs(rel.Y) <= lobbyPart.Size.Y/2 and math.abs(rel.Z) <= lobbyPart.Size.Z/2
+end
+
+local function startAutoSave(player, profile)
+	if RunService:IsStudio() then return end -- Don't autosave test data
+	AutoSaveTasks[player] = task.spawn(function()
+		while player.Parent == Players and Profiles[player] do
+			task.wait(AUTOSAVE_INTERVAL)
+			safeSave(profile)
+		end
+	end)
+end
+
+local function stopAutoSave(player)
+	if AutoSaveTasks[player] then
+		task.cancel(AutoSaveTasks[player])
+		AutoSaveTasks[player] = nil
+	end
+end
+
+local function syncHighestKillStreak(player, profile)
+	if not profile then return end
+	local current = profile.Data.KillStreak or 0
+	local highest = profile.Data.HighestKillStreak or 0
+	if current > highest then
+		profile.Data.HighestKillStreak = current
+	end
+	StatsService:SyncStat(player, profile, "HighestKillStreak")
+end
+
+local function syncPositiveMoneyStats(player, profile, amount)
+	if not profile or (amount or 0) <= 0 then
+		return
+	end
+	profile.Data.TotalGSEarned = (profile.Data.TotalGSEarned or 0) + amount
+	StatsService:SyncStat(player, profile, "G$Earned")
+end
+
+local function handleDeath(player, profile, character)
+	if not profile or not character then return end
+	if isInLobby(character) then
+		safeSave(profile)
+		return
+	end
+	if profile.Data.KillStreak >= 8 then
+		profile.Data.LastLostStreak = profile.Data.KillStreak
+		profile.Data.KillStreak = 0
+		safeSave(profile)
+		PromptRestoreStreak:FireClient(player, profile.Data.LastLostStreak)
+	else
+		profile.Data.KillStreak = 0
+		safeSave(profile)
+	end
+	local ks = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("KillStreak")
+	if ks then
+		ks.Value = profile.Data.KillStreak
+	end
+end
+
+function ProfileManager:GetProfile(player)
+	return Profiles[player]
+end
+
+function ProfileManager:AddMoney(player, amount)
+	local profile = Profiles[player]
+	if profile then
+		profile.Data.Money += amount
+		syncPositiveMoneyStats(player, profile, amount)
+		safeSave(profile)
+		local moneyStat = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("G$")
+		if moneyStat then
+			moneyStat.Value = profile.Data.Money
+		end
+		if player:FindFirstChild("Money") then
+			player.Money.Value = profile.Data.Money
+		end
+		local QuestServer = require(game.ServerScriptService.QuestServer)
+		QuestServer.IncrementQuest(player, "MoneyEarned", amount)
+	end
+end
+
+function ProfileManager:AddDuelWin(player)
+	local profile = Profiles[player]
+	if profile then
+		profile.Data.Money += 15
+		syncPositiveMoneyStats(player, profile, 15)
+		safeSave(profile)
+		local moneyStat = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("G$")
+		if moneyStat then
+			moneyStat.Value = profile.Data.Money
+		end
+		if player:FindFirstChild("Money") then
+			player.Money.Value = profile.Data.Money
+		end
+	end
+end
+
+function ProfileManager:AddGauntlentToInventory(Player, Gauntlent, Rarity)
+	local Profile = Profiles[Player]
+	if not Profile then return end
+	if table.find(Profile.Data.OwnedGauntlents, Gauntlent) then
+		if Rarity == "Common" then
+			ProfileManager:AddMoney(Player, 50)
+		elseif Rarity == "Uncommon" then
+			ProfileManager:AddMoney(Player, 100)
+		elseif Rarity == "Rare" then
+			ProfileManager:AddMoney(Player, 250)
+		elseif Rarity == "Epic" then
+			ProfileManager:AddMoney(Player, 500)
+		elseif Rarity == "Legendary" then
+			ProfileManager:AddMoney(Player, 1000)
+		end
+	else
+		table.insert(Profile.Data.OwnedGauntlents, Gauntlent)
+		local NV = Instance.new("StringValue", Player.OwnedGauntlents)
+		NV.Name = Gauntlent
+		NV.Value = Gauntlent
+	end
+	safeSave(Profile)
+end
+
+function ProfileManager:AddGrabs(player, amt)
+	local profile = Profiles[player]
+	if profile then
+		profile.Data.Grabs += amt
+		safeSave(profile)
+		local g = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Grabs")
+		if g then
+			g.Value = profile.Data.Grabs
+		end
+		StatsService:SyncStat(player, profile, "TotalGrabs")
+	end
+end
+
+function ProfileManager:AddGrabClashes(player, amt)
+	local profile = Profiles[player]
+	if profile then
+		profile.Data.TotalGrabClashes = (profile.Data.TotalGrabClashes or 0) + amt
+		StatsService:SyncStat(player, profile, "TotalGrabClashes")
+		safeSave(profile)
+	end
+end
+
+function ProfileManager:AddKills(player, amt, victimName)
+	local profile = Profiles[player]
+	if not profile then return end
+	victimName = victimName or "Unknown"
+	local now = os.clock()
+	profile.Data.Kills += amt
+	-- Capture previous kill time BEFORE we overwrite it, so double-kill detection compares to the prior kill
+	local prevKillTime = profile._lastKillTime
+	if prevKillTime == nil then
+		prevKillTime = now -- first-ever kill: use now so the streak window check is trivially true
+	end
+	if (now - prevKillTime) <= 10 then
+		profile.Data.KillStreak += amt
+	else
+		if profile.Data.KillStreak < 1 then
+			profile.Data.KillStreak = amt
+		end
+	end
+	profile._lastKillTime = now
+	safeSave(profile)
+	local ls = player:FindFirstChild("leaderstats")
+	if ls then
+		local k = ls:FindFirstChild("Kills")
+		local ks = ls:FindFirstChild("KillStreak")
+		if k then k.Value = profile.Data.Kills end
+		if ks then ks.Value = profile.Data.KillStreak end
+	end
+	StatsService:SyncStat(player, profile, "TotalKills")
+	syncHighestKillStreak(player, profile)
+	local baseReward = 5
+	local streak = profile.Data.KillStreak
+	local tier = math.clamp(streak, 1, 5)
+	local reward = baseReward
+	local rampageCount = 0
+	if tier == 5 then
+		reward += 5
+		profile._rampageCount = (profile._rampageCount or 0) + 1
+		rampageCount = profile._rampageCount
+	else
+		profile._rampageCount = 0
+	end
+	ProfileManager:AddMoney(player, reward)
+	local remotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes")
+	local PlaySFX2 = remotes:WaitForChild("PlaySFX")
+	PlaySFX2:FireClient(player, "Kill" .. tostring(tier))
+	local QuestServer = require(game.ServerScriptService.QuestServer)
+	QuestServer.IncrementQuest(player, "Kills", amt)
+	QuestServer.SetQuestMax(player, "KillStreak", streak)
+	-- Double kill: only counts if there was a prior kill AND it happened within 3 seconds
+	if prevKillTime ~= now and (now - prevKillTime) <= 3 then
+		QuestServer.IncrementQuest(player, "DoubleKills", 1)
+	end
+end
+
+function ProfileManager:SetKillStreak(player, streak)
+	local profile = Profiles[player]
+	if profile then
+		profile.Data.KillStreak = streak
+		syncHighestKillStreak(player, profile)
+		safeSave(profile)
+		local ks = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("KillStreak")
+		if ks then
+			ks.Value = profile.Data.KillStreak
+		end
+	end
+end
+
+function ProfileManager:PurchaseGlove(Player, ItemSection, ItemName)
+	local sectionTable = ShopInfo[ItemSection]
+	if not sectionTable then return end
+	local ItemInfo = sectionTable[ItemName]
+	if not ItemInfo then return end
+	local moneyVal = Player:FindFirstChild("Money")
+	if not moneyVal then return end
+	if moneyVal.Value >= (ItemInfo.Price or 0) then
+		local Profile = Profiles[Player]
+		if not ItemInfo.Robux then
+			Profile.Data.Money -= (ItemInfo.Price or 0)
+		end
+		if ItemSection == "Gauntlents" then
+			table.insert(Profile.Data.OwnedGauntlents, ItemName)
+		elseif ItemSection == "Abilities" then
+			table.insert(Profile.Data.OwnedAbilities, ItemName)
+		elseif ItemSection == "GrabAnimations" then
+			table.insert(Profile.Data.OwnedGrabAnimations, ItemName)
+		elseif ItemSection == "Titles" then
+			table.insert(Profile.Data.OwnedTitles, ItemName)
+		end
+		Player.Money.Value = Profile.Data.Money
+		local SV = Instance.new("StringValue", Player:FindFirstChild("Owned"..ItemSection))
+		SV.Name = ItemName
+		SV.Value = ItemName
+		safeSave(Profile)
+	end
+end
+
+function ProfileManager:EquipItem(Player, ItemSection, ItemName)
+	local Profile = Profiles[Player]
+	if not Profile then return end
+
+	if ItemSection == "Gauntlents" then
+		if table.find(Profile.Data.OwnedGauntlents, ItemName) then
+			Profile.Data.EquippedGauntlent = ItemName
+			Player.Equipped.EquippedGauntlent.Value = ItemName
+
+			local Tools = {}
+			for _, Child in pairs(Player.Backpack:GetChildren()) do
+				if Child:IsA("Tool") then
+					table.insert(Tools, Child)
+				end
+			end
+
+			if not Player.Character then
+				Player.CharacterAdded:Wait()
+			end
+
+			for _, Child in pairs(Player.Character:GetChildren()) do
+				if Child:IsA("Tool") then
+					table.insert(Tools, Child)
+				end
+			end
+
+			for _, Tool in pairs(Tools) do
+				if string.find(Tool.Name, "Gauntlent") then
+					Tool:Destroy()
+				end
+			end
+
+			local t = ServerStorage.GauntlentTools:FindFirstChild(ItemName)
+			if t then
+				t:Clone().Parent = Player.Backpack
+			end
+
+			Player.CharacterAdded:Connect(function(char)
+				task.wait(0.3)
+				local equipped = Player.Equipped and Player.Equipped:FindFirstChild("EquippedGauntlent")
+				local item = equipped and equipped.Value
+				if item and ServerStorage:FindFirstChild("GauntlentTools") then
+					local tool = ServerStorage.GauntlentTools:FindFirstChild(item)
+					if tool then
+						tool:Clone().Parent = Player.Backpack
+					end
+				end
+			end)
+		end
+	end
+end
+
+local function PlayerAdded(player)
+	local ProfileKey = player.UserId
+	if player.Name == "blackopsstuff" then
+		ProfileKey = "blackopsstuff_Studio_12"
+	end
+
+	local profile = PlayerStore:StartSessionAsync(tostring(ProfileKey), {
+		Cancel = function() return player.Parent ~= Players end,
+	})
+
+	if not profile then
+		player:Kick("Profile failed to load - Please rejoin.")
+		return
+	end
+
+	profile:AddUserId(player.UserId)
+	profile:Reconcile()
+	Profiles[player] = profile
+	syncHighestKillStreak(player, profile)
+
+	-- --- STUDIO TESTING LOGIC ---
+	-- This block runs if you are testing in Roblox Studio.
+	-- It gives you every item but doesn't let the script save to your real profile.
+	if RunService:IsStudio() then
+		warn("STUDIO DETECTED: Loading all items for testing. SAVING IS DISABLED.")
+
+		-- Give all Gauntlets
+		local GauntletTools = game:GetService("ServerStorage"):WaitForChild("GauntlentTools"):GetChildren()
+		local testGauntlets = GauntletTools--{"Furutistic"}
+
+		for _, tool in ipairs(testGauntlets) do
+			if not table.find(profile.Data.OwnedGauntlents, tool.Name) then
+				table.insert(profile.Data.OwnedGauntlents, tool.Name)
+			end
+		end
+
+		-- Give all Abilities (Assuming they follow a similar storage pattern or shop list)
+		-- Since I don't know where your ability scripts are stored, I'll add the common ones.
+		-- You can add more names to this list as needed.
+		-- give all abilities for testing
+		--[[local testAbilities = {
+			"AirDash",
+			"BlackHoleField",
+			"Blink",
+			"Dash",
+			"DoubleJump",
+			"FlashStep",
+			"Forcefield",
+			"HoloDecoy",
+			"Invisibility",
+			"MassPull",
+			"RealityShift",
+			"Shared",
+			"TimeStop",
+			"TrapField"
+		
+		for _, name in ipairs(testAbilities) do
+			if not table.find(profile.Data.OwnedAbilities, name) then
+				table.insert(profile.Data.OwnedAbilities, name)
+			end
+		end]]
+
+		profile.Data.Money = 999999
+	else
+		-- --- REAL DATA CLEANUP (Production only) ---
+		local function cleanDuplicates(tbl)
+			local seen = {}
+			local cleaned = {}
+			local changed = false
+			for _, val in ipairs(tbl) do
+				if not seen[val] then
+					seen[val] = true
+					table.insert(cleaned, val)
+				else
+					changed = true
+				end
+			end
+			return cleaned, changed
+		end
+
+		local gClean, gChanged = cleanDuplicates(profile.Data.OwnedGauntlents)
+		local aClean, aChanged = cleanDuplicates(profile.Data.OwnedAbilities)
+
+		if gChanged then profile.Data.OwnedGauntlents = gClean end
+		if aChanged then profile.Data.OwnedAbilities = aClean end
+		if gChanged or aChanged then safeSave(profile) end
+		-- --- END CLEANUP ---
+	end
+
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local grabs = Instance.new("IntValue", leaderstats)
+	grabs.Name = "Grabs"
+	grabs.Value = profile.Data.Grabs
+
+	local kills = Instance.new("IntValue", leaderstats)
+	kills.Name = "Kills"
+	kills.Value = profile.Data.Kills
+
+	local ks = Instance.new("IntValue", leaderstats)
+	ks.Name = "KillStreak"
+	ks.Value = profile.Data.KillStreak
+
+	local Money = Instance.new("IntValue", leaderstats)
+	Money.Name = "G$"
+	Money.Value = profile.Data.Money
+
+	local OwnedGauntlents = Instance.new("Folder", player)
+	OwnedGauntlents.Name = "OwnedGauntlents"
+
+	local OwnedAbilities = Instance.new("Folder", player)
+	OwnedAbilities.Name = "OwnedAbilities"
+
+	local OwnedGrabAnimations = Instance.new("Folder", player)
+	OwnedGrabAnimations.Name = "OwnedGrabAnimations"
+
+	local OwnedTitles = Instance.new("Folder", player)
+	OwnedTitles.Name = "OwnedTitles"
+
+	for _, abilityName in ipairs(profile.Data.OwnedAbilities) do
+		local sv = Instance.new("StringValue")
+		sv.Name = abilityName
+		sv.Value = abilityName
+		sv.Parent = OwnedAbilities
+	end
+
+	-- Ensure Dash exists if not already there
+	if not table.find(profile.Data.OwnedAbilities, "Dash") then
+		table.insert(profile.Data.OwnedAbilities, "Dash")
+		local sv = Instance.new("StringValue")
+		sv.Name = "Dash"
+		sv.Value = "Dash"
+		sv.Parent = OwnedAbilities
+	end
+
+	local MoneyValue = Instance.new("NumberValue", player)
+	MoneyValue.Name = "Money"
+	MoneyValue.Value = profile.Data.Money
+
+	StatsService:InitPlayer(player, profile)
+
+	local Equipped = Instance.new("Folder", player)
+	Equipped.Name = "Equipped"
+
+	local EquippedGauntlent = Instance.new("StringValue", Equipped)
+	EquippedGauntlent.Name = "EquippedGauntlent"
+	EquippedGauntlent.Value = profile.Data.EquippedGauntlent
+
+	local EquippedAbility = Instance.new("StringValue", Equipped)
+	EquippedAbility.Name = "EquippedAbility"
+	EquippedAbility.Value = profile.Data.EquippedAbility
+
+	if player.Name == "blackopsstuff" then
+		EquippedAbility.Value = "TrapField"
+	end
+
+	local EquippedTitle = Instance.new("StringValue", Equipped)
+	EquippedTitle.Name = "EquippedTitle"
+	EquippedTitle.Value = profile.Data.EquippedTitle
+
+	local EquippedGrabAnimation = Instance.new("StringValue", Equipped)
+	EquippedGrabAnimation.Name = "EquippedGrabAnimation"
+	EquippedGrabAnimation.Value = profile.Data.EquippedGrabAnimation
+
+	for _, ItemName in pairs(profile.Data.OwnedTitles) do
+		local SV = Instance.new("StringValue")
+		SV.Name = ItemName
+		SV.Value = ItemName
+		SV.Parent = OwnedTitles
+	end
+
+	for _, ItemName in pairs(profile.Data.OwnedGauntlents) do
+		local SV = Instance.new("StringValue")
+		SV.Name = ItemName
+		SV.Value = ItemName
+		SV.Parent = OwnedGauntlents
+	end
+
+	for _, ItemName in pairs(profile.Data.OwnedGrabAnimations) do
+		local SV = Instance.new("StringValue")
+		SV.Name = ItemName
+		SV.Value = ItemName
+		SV.Parent = OwnedGrabAnimations
+	end
+
+	startAutoSave(player, profile)
+
+	EquippedGauntlent.Changed:Connect(function(newItemName)
+		local ownedFolder = player:FindFirstChild("OwnedGauntlents")
+		if not ownedFolder or not ownedFolder:FindFirstChild(newItemName) then
+			warn(player.Name .. " tried to equip unowned item: " .. newItemName)
+			return
+		end
+
+		profile.Data.EquippedGauntlent = newItemName
+		safeSave(profile)
+
+		local function cleanup(container)
+			for _, item in ipairs(container:GetChildren()) do
+				if item:IsA("Tool") --[[and string.find(item.Name, "Gauntlent")]] then
+					item:Destroy()
+				end
+			end
+		end
+
+		cleanup(player.Backpack)
+		if player.Character then
+			cleanup(player.Character)
+		end
+
+		local toolStorage = ServerStorage:FindFirstChild("GauntlentTools")
+		if toolStorage then
+			local newTool = toolStorage:FindFirstChild(newItemName)
+			if newTool then
+				newTool:Clone().Parent = player.Backpack
+			else
+				warn("There is no tool in the GauntlentTools in server storage. Tool Name "..newItemName)
+			end
+		end
+	end)
+
+	EquippedAbility.Changed:Connect(function(newAbilityName)
+		local ownedFolder = player:FindFirstChild("OwnedAbilities")
+		if not ownedFolder or not ownedFolder:FindFirstChild(newAbilityName) then
+			warn(player.Name .. " tried to equip unowned item: " .. newAbilityName)
+			return
+		end
+		profile.Data.EquippedAbility = newAbilityName
+		safeSave(profile)
+	end)
+
+	EquippedGrabAnimation.Changed:Connect(function(newName)
+		profile.Data.EquippedGrabAnimation = newName
+		safeSave(profile)
+	end)
+
+	player.CharacterAdded:Connect(function(character)
+		while player.Character and player.Character ~= character do
+			task.wait()
+		end
+		task.wait(0.2)
+
+		local humanoid = character:WaitForChild("Humanoid")
+		humanoid.Died:Once(function()
+			handleDeath(player, profile, character)
+		end)
+	end)
+
+	if profile.Data.LastLostStreak > 0 then
+		PromptRestoreStreak:FireClient(player, profile.Data.LastLostStreak)
+	end
+
+	ProfileManager:EquipItem(player, "Gauntlents", profile.Data.EquippedGauntlent)
+end
+
+local function PlayerRemoving(player)
+	local profile = Profiles[player]
+	if profile then
+		safeSave(profile)
+		profile:EndSession()
+		Profiles[player] = nil
+	end
+	stopAutoSave(player)
+end
+
+MarketplaceService.ProcessReceipt = function(receiptInfo)
+	if receiptInfo.ProductId == RESTORE_PRODUCT_ID then
+		local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
+		if player then
+			local profile = Profiles[player]
+			if profile and profile.Data.LastLostStreak > 0 then
+				profile.Data.KillStreak = profile.Data.LastLostStreak
+				profile.Data.LastLostStreak = 0
+				syncHighestKillStreak(player, profile)
+				safeSave(profile)
+				local ks = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("KillStreak")
+				if ks then
+					ks.Value = profile.Data.KillStreak
+				end
+				StreakRestored:FireClient(player, profile.Data.KillStreak)
+				return Enum.ProductPurchaseDecision.PurchaseGranted
+			end
+		end
+	end
+	return Enum.ProductPurchaseDecision.NotProcessedYet
+end
+
+DeclineRestoreStreak.OnServerEvent:Connect(function(player)
+	local profile = Profiles[player]
+	if profile then
+		profile.Data.LastLostStreak = 0
+		safeSave(profile)
+	end
+end)
+
+Players.PlayerAdded:Connect(PlayerAdded)
+Players.PlayerRemoving:Connect(PlayerRemoving)
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		for player, profile in pairs(Profiles) do
+			if player and player.Parent == Players and profile and profile.Data then
+				profile.Data.TimePlayedSeconds = (profile.Data.TimePlayedSeconds or 0) + 1
+				StatsService:SyncStat(player, profile, "TimePlayed")
+			end
+		end
+	end
+end)
+
+function ProfileManager:GiveMoney(player, amount, reason)
+	local profile = Profiles[player]
+	if not profile then
+		warn("GiveMoney failed: No profile for", player)
+		return false
+	end
+
+	if typeof(amount) ~= "number" then
+		warn("GiveMoney failed: Invalid amount", amount)
+		return false
+	end
+
+	-- Add money
+	profile.Data.Money += amount
+	syncPositiveMoneyStats(player, profile, amount)
+
+	-- Update leaderstats
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if leaderstats then
+		local moneyStat = leaderstats:FindFirstChild("G$")
+		if moneyStat then
+			moneyStat.Value = profile.Data.Money
+		end
+	end
+
+	-- Update player value (if exists)
+	local moneyValue = player:FindFirstChild("Money")
+	if moneyValue then
+		moneyValue.Value = profile.Data.Money
+	end
+
+	-- Optional: reason logging (useful for debugging / analytics)
+	if reason then
+		print("[Money Added]", player.Name, "+", amount, "| Reason:", reason)
+	end
+
+	safeSave(profile)
+
+	return true
+end
+
+function ProfileManager:GiveAbility(player, abilityName)
+	local profile = Profiles[player]
+	if not profile then
+		warn("GiveAbility failed: No profile for", player)
+		return false
+	end
+	
+	if not table.find(profile.Data.OwnedAbilities, abilityName) then
+		table.insert(profile.Data.OwnedAbilities, abilityName)
+		
+	else
+		warn("GiveAbility failed: Already has ", abilityName, " for ", player)
+		return true
+	end
+		local OwnedAbilities = player:WaitForChild("OwnedAbilities")
+		if OwnedAbilities then
+			print("Added ability to player:", abilityName)
+			local newAbility = Instance.new("StringValue")
+			newAbility.Name = abilityName
+			newAbility.Value = abilityName
+			newAbility.Parent = OwnedAbilities
+		end
+		safeSave(profile)
+		return true
+	
+end
+
+for _, plr in ipairs(Players:GetPlayers()) do
+	task.spawn(PlayerAdded, plr)
+end
+
+game:BindToClose(function()
+	for _, profile in pairs(Profiles) do
+		safeSave(profile)
+		profile:EndSession()
+	end
+end)
+
+return ProfileManager
