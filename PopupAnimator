@@ -1,0 +1,178 @@
+local TweenService = game:GetService("TweenService")
+
+local PopupAnimator = {}
+PopupAnimator.__index = PopupAnimator
+
+local function addUDim2(a, b)
+	return UDim2.new(
+		a.X.Scale + b.X.Scale,
+		a.X.Offset + b.X.Offset,
+		a.Y.Scale + b.Y.Scale,
+		a.Y.Offset + b.Y.Offset
+	)
+end
+
+local function lerpTransparency(original, alpha)
+	return original + ((1 - original) * alpha)
+end
+
+local function cacheProperty(records, object, propertyName)
+	local ok, value = pcall(function()
+		return object[propertyName]
+	end)
+	if ok then
+		table.insert(records, {
+			object = object,
+			property = propertyName,
+			original = value,
+		})
+	end
+end
+
+local function collectTransparencyRecords(root)
+	local records = {}
+
+	local function inspect(object)
+		if object:IsA("GuiObject") then
+			cacheProperty(records, object, "BackgroundTransparency")
+		end
+		if object:IsA("ImageLabel") or object:IsA("ImageButton") then
+			cacheProperty(records, object, "ImageTransparency")
+		end
+		if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
+			cacheProperty(records, object, "TextTransparency")
+			cacheProperty(records, object, "TextStrokeTransparency")
+		end
+		if object:IsA("ScrollingFrame") then
+			cacheProperty(records, object, "ScrollBarImageTransparency")
+		end
+		if object:IsA("UIStroke") then
+			cacheProperty(records, object, "Transparency")
+		end
+	end
+
+	inspect(root)
+	for _, descendant in ipairs(root:GetDescendants()) do
+		inspect(descendant)
+	end
+
+	return records
+end
+
+function PopupAnimator.new(gui, main, options)
+	local self = setmetatable({}, PopupAnimator)
+	self.gui = gui
+	self.main = main
+	self.basePosition = main.Position
+	self.hiddenOffset = (options and options.HiddenOffset) or UDim2.fromOffset(0, 20)
+	self.openTweenInfo = (options and options.OpenTweenInfo) or TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	self.closeTweenInfo = (options and options.CloseTweenInfo) or TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	self.records = collectTransparencyRecords(main)
+	self.fadeValue = Instance.new("NumberValue")
+	self.fadeValue.Name = "PopupFadeValue"
+	self.fadeValue.Value = 0
+	self.animationToken = 0
+	self.animating = false
+	self.activePositionTween = nil
+	self.activeFadeTween = nil
+
+	self.fadeValue:GetPropertyChangedSignal("Value"):Connect(function()
+		self:_applyTransparency(self.fadeValue.Value)
+	end)
+
+	self:_setShownState()
+	return self
+end
+
+function PopupAnimator:_applyTransparency(alpha)
+	for _, record in ipairs(self.records) do
+		if record.object.Parent then
+			record.object[record.property] = lerpTransparency(record.original, alpha)
+		end
+	end
+end
+
+function PopupAnimator:_cancelTweens()
+	if self.activePositionTween then
+		self.activePositionTween:Cancel()
+	end
+	if self.activeFadeTween then
+		self.activeFadeTween:Cancel()
+	end
+	self.activePositionTween = nil
+	self.activeFadeTween = nil
+end
+
+function PopupAnimator:_beginAnimation()
+	self.animationToken += 1
+	self.animating = true
+	return self.animationToken
+end
+
+function PopupAnimator:_setShownState()
+	self.main.Visible = true
+	self.main.Position = self.basePosition
+	self.fadeValue.Value = 0
+end
+
+function PopupAnimator:_setHiddenState()
+	self.main.Visible = true
+	self.main.Position = addUDim2(self.basePosition, self.hiddenOffset)
+	self.fadeValue.Value = 1
+end
+
+function PopupAnimator:IsAnimating()
+	return self.animating
+end
+
+function PopupAnimator:PlayOpen()
+	self:_cancelTweens()
+	local token = self:_beginAnimation()
+	self:_setHiddenState()
+
+	self.activePositionTween = TweenService:Create(self.main, self.openTweenInfo, {
+		Position = self.basePosition,
+	})
+	self.activeFadeTween = TweenService:Create(self.fadeValue, self.openTweenInfo, {
+		Value = 0,
+	})
+
+	self.activeFadeTween.Completed:Connect(function(playbackState)
+		if token ~= self.animationToken or playbackState ~= Enum.PlaybackState.Completed then
+			return
+		end
+		self.animating = false
+		self:_setShownState()
+	end)
+
+	self.activePositionTween:Play()
+	self.activeFadeTween:Play()
+end
+
+function PopupAnimator:PlayClose()
+	self:_cancelTweens()
+	local token = self:_beginAnimation()
+	local hiddenPosition = addUDim2(self.basePosition, self.hiddenOffset)
+	self.main.Visible = true
+
+	self.activePositionTween = TweenService:Create(self.main, self.closeTweenInfo, {
+		Position = hiddenPosition,
+	})
+	self.activeFadeTween = TweenService:Create(self.fadeValue, self.closeTweenInfo, {
+		Value = 1,
+	})
+
+	self.activeFadeTween.Completed:Connect(function(playbackState)
+		if token ~= self.animationToken or playbackState ~= Enum.PlaybackState.Completed then
+			return
+		end
+		self.animating = false
+		self.gui.Enabled = false
+		self:_setShownState()
+	end)
+
+	self.activePositionTween:Play()
+	self.activeFadeTween:Play()
+end
+
+return PopupAnimator
