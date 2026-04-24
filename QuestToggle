@@ -1,0 +1,20 @@
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local button = script.Parent
+
+button.MouseButton1Click:Connect(function()
+	local oldQuests = playerGui:FindFirstChild("OldQuests")
+	if not oldQuests then return end
+	if oldQuests.Enabled then
+		-- Route close through BindableEvent so animation plays
+		local rc = oldQuests:FindFirstChild("RequestClose")
+		if rc then
+			rc:Fire()
+		else
+			oldQuests.Enabled = false
+		end
+	else
+		oldQuests.Enabled = true
+	end
+end)
