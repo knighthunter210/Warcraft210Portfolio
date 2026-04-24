@@ -1,11 +1,12 @@
 # Warcraft210Portfolio
 
-Hello, This system is a modular quest system that is for a Roblox Gauntlet pvp game with daily, weekly, and lifetime quests.
+**Hello!** This system is a modular quest system that is for a Roblox Gauntlet pvp game with daily, weekly, and lifetime quests.
 
 The system track player's combat system, survival time, kill streak, gold obtained, and kills. The UI updates in real time and have a reward claim feature.
 
 Through Player action such as kills, grab clashes, grabs, survival time, and earned gold contribute ot the quest progress to update the UI.
 
+```text
 src/
 ├─ ServerScriptService/
 │  ├─ QuestServer.lua
@@ -24,8 +25,9 @@ src/
 └─ ReplicatedStorage/
    └─ Modules/
       └─ PopupAnimator.lua
+```
 
-#Main Scripts
+**Main Scripts**
 Server
 QuestServer.lua
 
@@ -51,7 +53,7 @@ Reports survival-based progress into the quest system
 GauntletServer.lua
 Reports combat or interaction-based progress such as grab-related objectives
 
-#Client
+**Client**
 QuestController.client.lua
 Handles quest menu rendering
 Updates visible quest cards from server payloads
