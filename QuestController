@@ -1,0 +1,342 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local gui = script.Parent
+local main = gui:WaitForChild("Main")
+local closeButton = main:WaitForChild("Close")
+local topBar = main:WaitForChild("TopBar")
+
+local dailyButton = topBar:WaitForChild("Daily")
+local weeklyButton = topBar:WaitForChild("Weekly")
+local lifetimeButton = topBar:FindFirstChild("Lifetime")
+
+local SECTION_CONFIG = {
+	Daily = {
+		ScrollName = "ScrollingFrame",
+		Button = dailyButton,
+		Quests = {
+			{ID = "kills20", FrameName = "QuestsTempl"},
+			{ID = "streak5", FrameName = "KillStreakQuest"},
+			{ID = "grabs15", FrameName = "GrabQuest"},
+			{ID = "clash2", FrameName = "GrabClash"},
+			{ID = "money200", FrameName = "MoneyQuest"},
+			{ID = "survive6", FrameName = "SurviveQuest"},
+			{ID = "double3", FrameName = "DoubleKillQuest"},
+		},
+	},
+	Weekly = {
+		ScrollName = "WeeklyQuest",
+		Button = weeklyButton,
+		Quests = {
+			{ID = "weekKills100", FrameName = "QuestsTempl"},
+			{ID = "weekStreak10", FrameName = "KillStreakQuest"},
+			{ID = "weekGrabs75", FrameName = "GrabQuest"},
+			{ID = "weekClash10", FrameName = "GrabClash"},
+			{ID = "weekMoney3000", FrameName = "MoneyQuest"},
+			{ID = "weekSurvive15", FrameName = "SurviveQuest"},
+			{ID = "weekDouble10", FrameName = "DoubleKillQuest"},
+		},
+	},
+	Lifetime = {
+		ScrollName = "LifeTimeQuest",
+		Button = lifetimeButton,
+		Quests = {
+			{ID = "lifeKills2500", FrameName = "QuestsTempl"},
+			{ID = "lifeStreak15", FrameName = "KillStreakQuest"},
+			{ID = "lifeGrabs2000", FrameName = "GrabQuest"},
+			{ID = "lifeClash200", FrameName = "GrabClash"},
+			{ID = "lifeMoney25000", FrameName = "MoneyQuest"},
+			{ID = "lifeSurvive600", FrameName = "SurviveQuest"},
+			{ID = "lifeDouble350", FrameName = "DoubleKillQuest"},
+		},
+	},
+}
+
+local DEFAULT_SECTION = "Daily"
+local BAR_TWEEN = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+local questRemotes = ReplicatedStorage:WaitForChild("QuestRemotes")
+local updateRemote = questRemotes:WaitForChild("UpdateQuestUI")
+local questRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("QuestRemote")
+
+local PopupAnimator = require(ReplicatedStorage.Modules.PopupAnimator)
+local animator = PopupAnimator.new(gui, main, {
+	OpenTweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	CloseTweenInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+	HiddenOffset = UDim2.fromOffset(0, 20),
+})
+
+local activeSection = DEFAULT_SECTION
+local sectionFrames = {}
+local frameMaps = {}
+
+local function findQuest(activeQuests, id)
+	if not activeQuests then
+		return nil
+	end
+	for _, quest in ipairs(activeQuests) do
+		if quest.ID == id then
+			return quest
+		end
+	end
+	return nil
+end
+
+local function setButtonSelected(button, isSelected)
+	if not button then
+		return
+	end
+	button.TextTransparency = isSelected and 0 or 0.35
+	button.AutoButtonColor = not isSelected
+end
+
+local function showSection(sectionName)
+	activeSection = sectionName
+	for name, sectionConfig in pairs(SECTION_CONFIG) do
+		local scrollingFrame = sectionFrames[name]
+		if scrollingFrame then
+			scrollingFrame.Visible = name == sectionName
+		end
+		setButtonSelected(sectionConfig.Button, name == sectionName)
+	end
+end
+
+local function findClaimText(frame, claim)
+	if claim then
+		local nested = claim:FindFirstChild("A", true)
+		if nested and nested:IsA("TextLabel") then
+			return nested
+		end
+		for _, descendant in ipairs(claim:GetDescendants()) do
+			if descendant:IsA("TextLabel") then
+				return descendant
+			end
+		end
+	end
+
+	local direct = frame:FindFirstChild("A")
+	if direct and direct:IsA("TextLabel") then
+		return direct
+	end
+
+	for _, descendant in ipairs(frame:GetDescendants()) do
+		if descendant:IsA("TextLabel") and descendant.Name == "A" then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+local function setClaimText(frame, claim, text)
+	local claimText = findClaimText(frame, claim)
+	if claimText then
+		claimText.Text = text
+	end
+end
+
+local function setAText(frame, claim, text)
+	if claim then
+		local aLabel = claim:FindFirstChild("A", true)
+		if aLabel and aLabel:IsA("TextLabel") then
+			aLabel.Text = text
+			return
+		end
+	end
+
+	local direct = frame:FindFirstChild("A")
+	if direct and direct:IsA("TextLabel") then
+		direct.Text = text
+	end
+end
+
+local function requestClaim(frame, claim, questId)
+	if not claim or not claim.Active then
+		return
+	end
+	claim.Active = false
+	claim.AutoButtonColor = false
+	claim.ImageTransparency = 0.6
+	setClaimText(frame, claim, "Claimed!")
+	questRemote:FireServer("Claim", questId)
+end
+
+local function renderQuest(frame, quest, cur, isCompleted, isClaimed)
+	local goal = quest.Goal or 1
+	local divisor = quest.DisplayDivisor or 1
+	if cur > goal then
+		cur = goal
+	end
+
+	local displayCur = divisor > 1 and math.floor(cur / divisor) or cur
+	local displayGoal = divisor > 1 and math.floor(goal / divisor) or goal
+
+	local titleLabel = frame:FindFirstChild("QuestTitle")
+	if titleLabel then
+		titleLabel.Text = quest.Description or quest.ID
+	end
+
+	local status = frame:FindFirstChild("QuestStatus")
+	if status then
+		status.Text = displayCur .. "/" .. displayGoal
+	end
+
+	local rewardLabel = frame:FindFirstChild("RewardAmount")
+	if rewardLabel then
+		rewardLabel.Text = (quest.Reward or 0) .. "G$"
+	end
+
+	local bar = frame:FindFirstChild("BarWhole")
+	if bar then
+		local fill = bar:FindFirstChild("BarFill")
+		if fill then
+			local pct = math.clamp(cur / goal, 0, 1)
+			TweenService:Create(fill, BAR_TWEEN, {Size = UDim2.new(pct, 0, 1, 0)}):Play()
+		end
+	end
+
+	local claim = frame:FindFirstChild("Claim")
+	if claim then
+		if isClaimed then
+			claim.Active = false
+			claim.AutoButtonColor = false
+			claim.ImageTransparency = 0.6
+			setClaimText(frame, claim, "Claimed!")
+			setAText(frame, claim, "Claimed!")
+		elseif isCompleted then
+			claim.Active = true
+			claim.AutoButtonColor = true
+			claim.ImageTransparency = 0
+			setClaimText(frame, claim, "Claim!")
+			setAText(frame, claim, "REWARD")
+		else
+			claim.Active = false
+			claim.AutoButtonColor = false
+			claim.ImageTransparency = 0
+			setClaimText(frame, claim, "Claim!")
+			setAText(frame, claim, "REWARD")
+		end
+	end
+end
+
+local function updateSection(sectionName, sectionPayload)
+	sectionPayload = sectionPayload or {}
+	local activeQuests = sectionPayload.ActiveQuests or {}
+	local progress = sectionPayload.Progress or {}
+	local completed = sectionPayload.Completed or {}
+	local claimed = sectionPayload.Claimed or {}
+
+	for _, questConfig in ipairs(SECTION_CONFIG[sectionName].Quests) do
+		local frame = frameMaps[sectionName][questConfig.ID]
+		if frame then
+			local quest = findQuest(activeQuests, questConfig.ID)
+			if quest then
+				frame.Visible = true
+				local current = progress[questConfig.ID] or 0
+				local isCompleted = table.find(completed, questConfig.ID) ~= nil
+				local isClaimed = table.find(claimed, questConfig.ID) ~= nil
+				renderQuest(frame, quest, current, isCompleted, isClaimed)
+			else
+				frame.Visible = false
+			end
+		end
+	end
+end
+
+local function normalizePayload(firstArg, progress, completed, claimed)
+	if type(firstArg) ~= "table" then
+		return {}
+	end
+	if firstArg.Daily or firstArg.Weekly or firstArg.Lifetime then
+		return firstArg
+	end
+	return {
+		Daily = {
+			ActiveQuests = firstArg or {},
+			Progress = progress or {},
+			Completed = completed or {},
+			Claimed = claimed or {},
+		},
+	}
+end
+
+for sectionName, sectionConfig in pairs(SECTION_CONFIG) do
+	local scrollingFrame = main:WaitForChild(sectionConfig.ScrollName)
+	sectionFrames[sectionName] = scrollingFrame
+	frameMaps[sectionName] = {}
+
+	for _, questConfig in ipairs(sectionConfig.Quests) do
+		local frame = scrollingFrame:FindFirstChild(questConfig.FrameName)
+		if frame then
+			frameMaps[sectionName][questConfig.ID] = frame
+			local claim = frame:FindFirstChild("Claim")
+			if claim and not claim:GetAttribute("Wired") then
+				claim:SetAttribute("Wired", true)
+				claim.MouseButton1Click:Connect(function()
+					requestClaim(frame, claim, questConfig.ID)
+				end)
+
+				local claimText = findClaimText(frame, claim)
+				if claimText and claimText:IsA("GuiObject") then
+					claimText.InputEnded:Connect(function(input)
+						if input.UserInputType == Enum.UserInputType.MouseButton1 then
+							requestClaim(frame, claim, questConfig.ID)
+						end
+					end)
+				end
+			end
+		else
+			warn("[QuestController] Missing frame:", questConfig.FrameName, "for", sectionName, questConfig.ID)
+		end
+	end
+end
+
+showSection(DEFAULT_SECTION)
+
+if dailyButton then
+	dailyButton.MouseButton1Click:Connect(function()
+		showSection("Daily")
+	end)
+end
+
+if weeklyButton then
+	weeklyButton.MouseButton1Click:Connect(function()
+		showSection("Weekly")
+	end)
+end
+
+if lifetimeButton then
+	lifetimeButton.MouseButton1Click:Connect(function()
+		showSection("Lifetime")
+	end)
+end
+
+gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+	if gui.Enabled then
+		showSection(activeSection)
+		animator:PlayOpen()
+	end
+end)
+if gui.Enabled then
+	showSection(activeSection)
+	animator:PlayOpen()
+end
+
+updateRemote.OnClientEvent:Connect(function(firstArg, progress, completed, claimed)
+	local payload = normalizePayload(firstArg, progress, completed, claimed)
+	for sectionName in pairs(SECTION_CONFIG) do
+		updateSection(sectionName, payload[sectionName])
+	end
+end)
+
+closeButton.MouseButton1Click:Connect(function()
+	if animator:IsAnimating() then return end
+	animator:PlayClose()
+end)
+
+local requestClose = gui:WaitForChild("RequestClose")
+requestClose.Event:Connect(function()
+	if animator:IsAnimating() or not gui.Enabled then return end
+	animator:PlayClose()
+end)
