@@ -1,0 +1,400 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ProfileManager = require(game.ServerScriptService.Data.ProfileManager)
+local QuestDefinitions = require(game.ServerScriptService.Data.QuestDefinitions)
+
+local Remotes = ReplicatedStorage:FindFirstChild("QuestRemotes") or Instance.new("Folder")
+Remotes.Name = "QuestRemotes"
+Remotes.Parent = ReplicatedStorage
+
+local UpdateQuestUI = Remotes:FindFirstChild("UpdateQuestUI") or Instance.new("RemoteEvent")
+UpdateQuestUI.Name = "UpdateQuestUI"
+UpdateQuestUI.Parent = Remotes
+
+local QuestRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("QuestRemote")
+
+local SECTION_ORDER = QuestDefinitions:GetSectionNames()
+local SectionConfigs = {}
+local QuestSectionById = {}
+
+for _, sectionName in ipairs(SECTION_ORDER) do
+	local sectionConfig = QuestDefinitions:GetSection(sectionName)
+	if sectionConfig then
+		SectionConfigs[sectionName] = sectionConfig
+		for _, def in ipairs(sectionConfig.Definitions) do
+			if QuestSectionById[def.ID] then
+				warn("[QuestServer] Duplicate quest ID found:", def.ID)
+			end
+			QuestSectionById[def.ID] = sectionName
+		end
+	end
+end
+
+local function getProfileAwait(player, timeout)
+	local t0 = os.clock()
+	timeout = timeout or 10
+	while os.clock() - t0 < timeout do
+		local profile = ProfileManager:GetProfile(player)
+		if profile then
+			return profile
+		end
+		task.wait(0.1)
+	end
+	return nil
+end
+
+local function ensureSectionState(profile, sectionConfig)
+	local data = profile.Data
+	if type(data[sectionConfig.ActiveKey]) ~= "table" then
+		data[sectionConfig.ActiveKey] = {}
+	end
+	if type(data[sectionConfig.ProgressKey]) ~= "table" then
+		data[sectionConfig.ProgressKey] = {}
+	end
+	if type(data[sectionConfig.CompletedKey]) ~= "table" then
+		data[sectionConfig.CompletedKey] = {}
+	end
+	if type(data[sectionConfig.ClaimedKey]) ~= "table" then
+		data[sectionConfig.ClaimedKey] = {}
+	end
+	if type(data[sectionConfig.ResetKey]) ~= "number" then
+		data[sectionConfig.ResetKey] = 0
+	end
+end
+
+local function normalizeQuestList(profile, sectionConfig)
+	ensureSectionState(profile, sectionConfig)
+
+	local data = profile.Data
+	local progress = data[sectionConfig.ProgressKey]
+	local claimedLookup = {}
+	for _, questId in ipairs(data[sectionConfig.ClaimedKey]) do
+		claimedLookup[questId] = true
+	end
+
+	local normalizedCompleted = {}
+
+	for _, quest in ipairs(data[sectionConfig.ActiveKey]) do
+		local def = quest.ID and sectionConfig.DefinitionsById[quest.ID] or nil
+		if def then
+			quest.Description = def.Description
+			quest.Goal = def.Goal
+			quest.Stat = def.Stat
+			quest.Reward = def.Reward or 150
+			quest.DisplayDivisor = def.DisplayDivisor
+		elseif quest.Reward == nil then
+			quest.Reward = 150
+		end
+
+		local goal = quest.Goal or 1
+		local current = math.min(progress[quest.ID] or 0, goal)
+		progress[quest.ID] = current
+
+		if claimedLookup[quest.ID] or current >= goal then
+			table.insert(normalizedCompleted, quest.ID)
+		end
+	end
+
+	data[sectionConfig.CompletedKey] = normalizedCompleted
+end
+
+local function buildQuestList(sectionConfig)
+	local active = {}
+	for _, id in ipairs(sectionConfig.GuaranteedIds) do
+		local def = sectionConfig.DefinitionsById[id]
+		if def then
+			table.insert(active, QuestDefinitions:BuildQuestFromDef(def))
+		end
+	end
+	return active
+end
+
+local function hasAllGuaranteedQuests(activeQuests, sectionConfig)
+	local existing = {}
+	for _, quest in ipairs(activeQuests) do
+		if quest.ID then
+			existing[quest.ID] = true
+		end
+	end
+	for _, id in ipairs(sectionConfig.GuaranteedIds) do
+		if not existing[id] then
+			return false
+		end
+	end
+	return true
+end
+
+local function assignQuestSection(profile, sectionConfig)
+	ensureSectionState(profile, sectionConfig)
+	local data = profile.Data
+	local activeQuests = data[sectionConfig.ActiveKey]
+	local now = os.time()
+	local lastReset = data[sectionConfig.ResetKey] or 0
+	local shouldReset = now - lastReset >= sectionConfig.ResetSeconds
+
+	if shouldReset or #activeQuests == 0 then
+		data[sectionConfig.ActiveKey] = buildQuestList(sectionConfig)
+		data[sectionConfig.ProgressKey] = {}
+		data[sectionConfig.CompletedKey] = {}
+		data[sectionConfig.ClaimedKey] = {}
+		data[sectionConfig.ResetKey] = now
+	else
+		normalizeQuestList(profile, sectionConfig)
+		if not hasAllGuaranteedQuests(data[sectionConfig.ActiveKey], sectionConfig) then
+			data[sectionConfig.ActiveKey] = buildQuestList(sectionConfig)
+		end
+	end
+
+	normalizeQuestList(profile, sectionConfig)
+end
+
+local function pushUpdate(player, profile)
+	local payload = {}
+	for _, sectionName in ipairs(SECTION_ORDER) do
+		local sectionConfig = SectionConfigs[sectionName]
+		if sectionConfig then
+			ensureSectionState(profile, sectionConfig)
+			normalizeQuestList(profile, sectionConfig)
+			payload[sectionName] = {
+				ActiveQuests = profile.Data[sectionConfig.ActiveKey],
+				Progress = profile.Data[sectionConfig.ProgressKey],
+				Completed = profile.Data[sectionConfig.CompletedKey],
+				Claimed = profile.Data[sectionConfig.ClaimedKey],
+			}
+		end
+	end
+	UpdateQuestUI:FireClient(player, payload)
+end
+
+local function assignAllQuestSections(player)
+	local profile = getProfileAwait(player)
+	if not profile then
+		return
+	end
+
+	for _, sectionName in ipairs(SECTION_ORDER) do
+		local sectionConfig = SectionConfigs[sectionName]
+		if sectionConfig then
+			assignQuestSection(profile, sectionConfig)
+		end
+	end
+
+	pushUpdate(player, profile)
+end
+
+Players.PlayerAdded:Connect(assignAllQuestSections)
+for _, player in ipairs(Players:GetPlayers()) do
+	task.spawn(assignAllQuestSections, player)
+end
+
+local function markCompleted(completedList, questId)
+	if not table.find(completedList, questId) then
+		table.insert(completedList, questId)
+		return true
+	end
+	return false
+end
+
+local function incrementSectionQuest(profile, sectionConfig, stat, amount)
+	ensureSectionState(profile, sectionConfig)
+	normalizeQuestList(profile, sectionConfig)
+
+	local data = profile.Data
+	local progress = data[sectionConfig.ProgressKey]
+	local completed = data[sectionConfig.CompletedKey]
+	local changed = false
+
+	for _, quest in ipairs(data[sectionConfig.ActiveKey]) do
+		if quest.Stat == stat and not table.find(completed, quest.ID) then
+			local current = progress[quest.ID] or 0
+			local newValue = math.min(current + amount, quest.Goal or 1)
+			if newValue ~= current then
+				progress[quest.ID] = newValue
+				changed = true
+			end
+			if newValue >= (quest.Goal or 1) then
+				changed = markCompleted(completed, quest.ID) or changed
+			end
+		end
+	end
+
+	return changed
+end
+
+local function setSectionQuestMax(profile, sectionConfig, stat, value)
+	ensureSectionState(profile, sectionConfig)
+	normalizeQuestList(profile, sectionConfig)
+
+	local data = profile.Data
+	local progress = data[sectionConfig.ProgressKey]
+	local completed = data[sectionConfig.CompletedKey]
+	local changed = false
+
+	for _, quest in ipairs(data[sectionConfig.ActiveKey]) do
+		if quest.Stat == stat and not table.find(completed, quest.ID) then
+			local current = progress[quest.ID] or 0
+			local newValue = math.min(value, quest.Goal or 1)
+			if newValue > current then
+				progress[quest.ID] = newValue
+				changed = true
+				if newValue >= (quest.Goal or 1) then
+					changed = markCompleted(completed, quest.ID) or changed
+				end
+			end
+		end
+	end
+
+	return changed
+end
+
+local function resetSectionQuestProgress(profile, sectionConfig, stat)
+	ensureSectionState(profile, sectionConfig)
+	normalizeQuestList(profile, sectionConfig)
+
+	local data = profile.Data
+	local progress = data[sectionConfig.ProgressKey]
+	local completed = data[sectionConfig.CompletedKey]
+	local changed = false
+
+	for _, quest in ipairs(data[sectionConfig.ActiveKey]) do
+		if quest.Stat == stat and not table.find(completed, quest.ID) then
+			if (progress[quest.ID] or 0) ~= 0 then
+				progress[quest.ID] = 0
+				changed = true
+			end
+		end
+	end
+
+	return changed
+end
+
+local function incrementQuest(player, stat, amount)
+	local profile = ProfileManager:GetProfile(player)
+	if not profile then
+		return
+	end
+
+	local changed = false
+	amount = amount or 1
+	for _, sectionName in ipairs(SECTION_ORDER) do
+		local sectionConfig = SectionConfigs[sectionName]
+		if sectionConfig then
+			changed = incrementSectionQuest(profile, sectionConfig, stat, amount) or changed
+		end
+	end
+
+	if changed then
+		pushUpdate(player, profile)
+	end
+end
+
+QuestRemote.OnServerEvent:Connect(function(player, action, questId)
+	if action ~= "Claim" or type(questId) ~= "string" then
+		return
+	end
+
+	local profile = ProfileManager:GetProfile(player)
+	if not profile then
+		return
+	end
+
+	local sectionName = QuestSectionById[questId]
+	local sectionConfig = sectionName and SectionConfigs[sectionName] or nil
+	if not sectionConfig then
+		return
+	end
+
+	ensureSectionState(profile, sectionConfig)
+	normalizeQuestList(profile, sectionConfig)
+
+	local data = profile.Data
+	local completed = data[sectionConfig.CompletedKey]
+	local claimed = data[sectionConfig.ClaimedKey]
+	if not table.find(completed, questId) then
+		return
+	end
+	if table.find(claimed, questId) then
+		return
+	end
+
+	local reward
+	for _, quest in ipairs(data[sectionConfig.ActiveKey]) do
+		if quest.ID == questId then
+			reward = quest.Reward or 150
+			break
+		end
+	end
+	if not reward then
+		return
+	end
+
+	table.insert(claimed, questId)
+	ProfileManager:AddMoney(player, reward)
+	pushUpdate(player, profile)
+end)
+
+local function setQuestMax(player, stat, value)
+	local profile = ProfileManager:GetProfile(player)
+	if not profile then
+		return
+	end
+
+	local changed = false
+	for _, sectionName in ipairs(SECTION_ORDER) do
+		local sectionConfig = SectionConfigs[sectionName]
+		if sectionConfig then
+			changed = setSectionQuestMax(profile, sectionConfig, stat, value) or changed
+		end
+	end
+
+	if changed then
+		pushUpdate(player, profile)
+	end
+end
+
+local function resetQuestProgress(player, stat)
+	local profile = ProfileManager:GetProfile(player)
+	if not profile then
+		return
+	end
+
+	local changed = false
+	for _, sectionName in ipairs(SECTION_ORDER) do
+		local sectionConfig = SectionConfigs[sectionName]
+		if sectionConfig then
+			changed = resetSectionQuestProgress(profile, sectionConfig, stat) or changed
+		end
+	end
+
+	if changed then
+		pushUpdate(player, profile)
+	end
+end
+
+local function resetAllQuestProgress(player)
+	local profile = ProfileManager:GetProfile(player)
+	if not profile then
+		return
+	end
+
+	for _, sectionName in ipairs(SECTION_ORDER) do
+		local sectionConfig = SectionConfigs[sectionName]
+		if sectionConfig then
+			ensureSectionState(profile, sectionConfig)
+			profile.Data[sectionConfig.ProgressKey] = {}
+			profile.Data[sectionConfig.CompletedKey] = {}
+			profile.Data[sectionConfig.ClaimedKey] = {}
+		end
+	end
+
+	pushUpdate(player, profile)
+end
+
+return {
+	IncrementQuest = incrementQuest,
+	SetQuestMax = setQuestMax,
+	ResetQuestProgress = resetQuestProgress,
+	ResetAllQuestProgress = resetAllQuestProgress,
+	AssignAllQuestSections = assignAllQuestSections,
+}
