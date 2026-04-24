@@ -1,0 +1,53 @@
+local Players = game:GetService("Players")
+local QuestServer = require(game.ServerScriptService.QuestServer)
+
+local BattlePart = workspace:WaitForChild("BattlePart")
+
+local function isInsideBattleArea(character)
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return false
+	end
+
+	local relative = BattlePart.CFrame:PointToObjectSpace(root.Position)
+	local size = BattlePart.Size / 2
+
+	return math.abs(relative.X) <= size.X
+		and math.abs(relative.Y) <= size.Y
+		and math.abs(relative.Z) <= size.Z
+end
+
+-- Reset SurvivalTime when the character dies
+local function bindCharacter(player, character)
+	local hum = character:WaitForChild("Humanoid", 5)
+	if not hum then return end
+	hum.Died:Connect(function()
+		QuestServer.ResetQuestProgress(player, "SurvivalTime")
+	end)
+end
+
+local function onPlayerAdded(player)
+	if player.Character then
+		bindCharacter(player, player.Character)
+	end
+	player.CharacterAdded:Connect(function(char)
+		bindCharacter(player, char)
+	end)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+for _, player in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, player)
+end
+
+-- Tick every second: only progress while alive AND inside the battle area
+while task.wait(1) do
+	for _, player in ipairs(Players:GetPlayers()) do
+		local char = player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+		if hum and hum.Health > 0 and isInsideBattleArea(char) then
+			QuestServer.IncrementQuest(player, "SurvivalTime", 1)
+		end
+	end
+end
